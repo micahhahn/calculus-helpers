@@ -9,7 +9,7 @@ module Lib
 
 import Data.Functor.Foldable
 import Data.Functor.Foldable.TH
-import Data.List (intercalate)
+import Data.List (intercalate, partition, foldl1', foldl', sort, sortOn)
 import Data.Sparse.SpMatrix
 import Data.Sparse.SpVector
 import Numeric.LinearAlgebra.Sparse
@@ -21,50 +21,66 @@ a' = fromListDenseSM 2 [ 1, 3
 b' :: SpVector Double
 b' = mkSpVR 2 [1, 3]
 
-data Exp a = Add (Exp a) (Exp a)
-           | Mul (Exp a) (Exp a)
-           | Var Char
+data Exp a = Add [Exp a]
+           | Mul [Exp a]
            | Lit a
-           deriving (Show, Eq)
+           | Var Char
+           deriving (Show, Eq, Ord)
 
 instance (Num a) => Num (Exp a) where
-    negate = (Lit (-1) `Mul`)
-    (+) = Add
-    (*) = Mul
+    negate x = (Lit (-1) * x)
+    (+) x y = Add [x, y]
+    (*) x y = Mul [x, y]
     fromInteger = Lit . fromInteger
     abs = id
     signum = id
 
 makeBaseFunctor ''Exp
 
-simp :: (Num a) => Exp a -> Exp a
-simp e = cata f e
-    where f ((l `Add` r) `MulF` y) = (l * y) + (r * y)
-          f (x `MulF` (l `Add` r)) = (x * l) + (x * r)
-          f x = embed x
+simp :: (Num a, Ord a) => Exp a -> Exp a
+simp e = cata order . cata dist . cata flatten $ e
+    where flatten (MulF as) = let (ms, bs) = partition isMul as
+                               in Mul $ concat [ms' | (Mul ms') <- ms ] ++ bs
+          flatten (AddF as) = let (ms, bs) = partition isAdd as
+                               in Add $ concat [ms' | (Add ms') <- ms ] ++ bs
+          flatten x = embed x
 
-simplify :: (Num a) => Exp a -> Exp a
-{- Always distribute multiplications -}
-simplify ((Add l r) `Mul` y) = (l * y) + (r * y)
-simplify (x `Mul` (Add l r)) = (x * l) + (x * r)
-simplify x = x
+          dist (MulF as) = foldl1' (\l r -> Add $ (\l' r' -> flatten $ MulF [l', r']) <$> unAdd l <*> unAdd r) as
+          dist (AddF as) = flatten (AddF as)
+          dist x = embed x
 
-simplifyR :: (Num a, Eq a) => Exp a -> [Exp a]
-simplifyR e = let e' = simp e
-               in if e == e' then [e] else e : simplifyR e'
+          order (MulF as) = let (ls, ns) = partition isLit as
+                             in Mul $ sort ((Lit $ product [ x | (Lit x) <- ls]) : ns)
+          order (AddF as) = let adds = sortOn (filter (not . isLit) . unMul) as
+                                x = foldl' (\((pl:pns):ps) (al:ans) -> if pns == ans then ((addLit pl al):pns):ps else (al:ans):(pl:pns):ps) [(unMul . head $ adds)] (unMul <$> tail adds)
+                             in Add (Mul <$> x)
+          order x = embed x
+
+          unAdd (Add as) = as
+          unAdd x = [x]
+
+          unMul (Mul as) = as
+          unMul x = [x]
+
+          isMul (Mul _) = True
+          isMul _ = False
+
+          isAdd (Add _) = True
+          isAdd _ = False
+
+          isLit (Lit _) = True
+          isLit _ = False
+
+          addLit (Lit l) (Lit r) = Lit (l + r) 
 
 p :: (Show a) => [Exp a] -> String
 p es = intercalate "\n" (pretty <$> es)
 
 pretty :: (Show a) => Exp a -> String
-pretty (l `Add` r) = pretty l ++ " + " ++ pretty r
-pretty (x `Mul` y) = let x' = case x of
-                                  (_ `Add` _) -> "(" ++ pretty x ++ ")"
-                                  _ -> pretty x
-                         y' = case y of 
-                                  (_ `Add` _) -> "(" ++ pretty y ++ ")"
-                                  _ -> pretty y
-                      in x' ++ y'
+pretty (Add as) = intercalate " + " (pretty <$> as)
+pretty (Mul ms) = concat $ (\m -> case m of
+                                     Add _ -> "(" ++ pretty m ++ ")"
+                                     _ -> pretty m) <$> ms
 pretty (Var c) = [c]
 pretty (Lit a) = show a
 
@@ -75,7 +91,7 @@ d = Var 'd'
 e = Var 'e'
 f = Var 'f'
 
-test = ((a + b) * (c + d)) * (e + f)
+test = (a + 1)^5
 
 someFunc :: IO ()
 someFunc = do
